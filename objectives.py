@@ -43,12 +43,17 @@ class cca_loss():
         # assert torch.isnan(SigmaHat22).sum().item() == 0
 
         # Calculating the root inverse of covariance matrices by using eigen decomposition
-        [D1, V1] = torch.symeig(SigmaHat11, eigenvectors=True)
-        [D2, V2] = torch.symeig(SigmaHat22, eigenvectors=True)
-        # assert torch.isnan(D1).sum().item() == 0
-        # assert torch.isnan(D2).sum().item() == 0
-        # assert torch.isnan(V1).sum().item() == 0
-        # assert torch.isnan(V2).sum().item() == 0
+        [D1, V1] = torch.linalg.eig(SigmaHat11)
+        [D2, V2] = torch.linalg.eig(SigmaHat22)
+        assert torch.isnan(D1).sum().item() == 0
+        assert torch.isnan(D2).sum().item() == 0
+        assert torch.isnan(V1).sum().item() == 0
+        assert torch.isnan(V2).sum().item() == 0
+
+        D1 = D1.to(torch.float32)
+        D2 = D2.to(torch.float32)
+        V1 = V1.to(torch.float32)
+        V2 = V2.to(torch.float32)
 
         # Added to increase stability
         posInd1 = torch.gt(D1, eps).nonzero()[:, 0]
@@ -64,10 +69,14 @@ class cca_loss():
             torch.matmul(V1, torch.diag(D1 ** -0.5)), V1.t())
         SigmaHat22RootInv = torch.matmul(
             torch.matmul(V2, torch.diag(D2 ** -0.5)), V2.t())
-
+        
+        SigmaHat12 = SigmaHat12.to(torch.float32)
+        # print("SigmaHat11RootInv = ",SigmaHat11RootInv.dtype)
+        # print("SigmaHat12 = ",SigmaHat12.dtype)
+        # print("SigmaHat22RootInv = ",SigmaHat22RootInv.dtype)
         Tval = torch.matmul(torch.matmul(SigmaHat11RootInv,
                                          SigmaHat12), SigmaHat22RootInv)
-#         print(Tval.size())
+        #         print(Tval.size())
 
         if self.use_all_singular_values:
             # all singular values are used to calculate the correlation
@@ -78,7 +87,9 @@ class cca_loss():
             # just the top self.outdim_size singular values are used
             trace_TT = torch.matmul(Tval.t(), Tval)
             trace_TT = torch.add(trace_TT, (torch.eye(trace_TT.shape[0])*r1).to(self.device)) # regularization for more stability
-            U, V = torch.symeig(trace_TT, eigenvectors=True)
+            U, V = torch.linalg.eig(trace_TT)
+            U = U.to(torch.float32)
+            V = V.to(torch.float32)
             U = torch.where(U>eps, U, (torch.ones(U.shape).double()*eps).to(self.device))
             U = U.topk(self.outdim_size)[0]
             corr = torch.sum(torch.sqrt(U))

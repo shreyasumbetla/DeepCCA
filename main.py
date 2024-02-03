@@ -15,16 +15,25 @@ except ImportError:
 import gzip
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
+
 torch.set_default_tensor_type(torch.DoubleTensor)
 
 
 class Solver():
-    def __init__(self, model, linear_cca, outdim_size, epoch_num, batch_size, learning_rate, reg_par, device=torch.device('cpu')):
+    def __init__(self, model, linear_cca, outdim_size, epoch_num, batch_size, learning_rate, reg_par, loss_type = 'CCA', device=torch.device('cpu')):
         self.model = nn.DataParallel(model)
         self.model.to(device)
         self.epoch_num = epoch_num
         self.batch_size = batch_size
-        self.loss = model.loss
+        # self.loss = F.mse_loss() #model.loss
+        if loss_type == 'MSE':
+            print("loss is MSE!!!!!!")
+            self.loss = nn.MSELoss()
+        else:
+            self.loss = model.loss
+        # self.loss = model.loss
+        self.loss_type = loss_type
         self.optimizer = torch.optim.RMSprop(
             self.model.parameters(), lr=learning_rate, weight_decay=reg_par)
         self.device = device
@@ -58,7 +67,9 @@ class Solver():
         data_size = x1.size(0)
 
         if vx1 is not None and vx2 is not None:
-            best_val_loss = 0
+            best_val_loss = 0 # for cca loss
+            if(self.loss_type == 'MSE'):
+                best_val_loss = 10 # for mse loss
             vx1.to(self.device)
             vx2.to(self.device)
         if tx1 is not None and tx2 is not None:
@@ -76,6 +87,7 @@ class Solver():
                 batch_x1 = x1[batch_idx, :]
                 batch_x2 = x2[batch_idx, :]
                 o1, o2 = self.model(batch_x1, batch_x2)
+                # loss = F.mse_loss(o1,o2) #self.loss(o1, o2)
                 loss = self.loss(o1, o2)
                 train_losses.append(loss.item())
                 loss.backward()
@@ -92,12 +104,18 @@ class Solver():
                         self.logger.info(
                             "Epoch {:d}: val_loss improved from {:.4f} to {:.4f}, saving model to {}".format(epoch + 1, best_val_loss, val_loss, checkpoint))
                         best_val_loss = val_loss
+                        # self.model = self.model.module
+                        print("saving model 1")
                         torch.save(self.model.state_dict(), checkpoint)
+                        # torch.save(self.model.module.state_dict(), checkpoint)
                     else:
                         self.logger.info("Epoch {:d}: val_loss did not improve from {:.4f}".format(
                             epoch + 1, best_val_loss))
             else:
+                # self.model = self.model.module
+                print("saving model 2")
                 torch.save(self.model.state_dict(), checkpoint)
+                # torch.save(self.model.module.state_dict(), checkpoint)
             epoch_time = time.time() - epoch_start_time
             self.logger.info(info_string.format(
                 epoch + 1, self.epoch_num, epoch_time, train_loss))
@@ -107,7 +125,25 @@ class Solver():
             self.train_linear_cca(outputs[0], outputs[1])
 
         checkpoint_ = torch.load(checkpoint)
-        self.model.load_state_dict(checkpoint_)
+        if isinstance(self.model, torch.nn.DataParallel):
+                # print("setting this!!!!!!!!!!")
+                self.model = self.model.module
+        # print(checkpoint_.keys())
+        # print(checkpoint_['state_dict'])
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint_.items():
+            name = k[7:] # remove 'module.' of dataparallel
+            new_state_dict[name]=v
+        # print("new checkpoint keys!")
+        # print(new_state_dict.keys())
+        # new_state_dict.to(self.device)
+        self.model.to(self.device)
+        # print("model device = ",self.model.get_device())
+        self.model.load_state_dict(new_state_dict)
+        # self.model.load_state_dict(checkpoint_)
+        # self.model = nn.DataParallel(self.model)
+        # self.model.load_state_dict(nn.DataParallel(checkpoint_))
         if vx1 is not None and vx2 is not None:
             loss = self.test(vx1, vx2)
             self.logger.info("loss on validation data: {:.4f}".format(loss))
@@ -117,6 +153,11 @@ class Solver():
             self.logger.info('loss on test data: {:.4f}'.format(loss))
 
     def test(self, x1, x2, use_linear_cca=False):
+        if x1 is not None and x2 is not None:
+            # x1.to(self.device)
+            # x2.to(self.device)
+            x1 = x1.to('cuda')
+            x2 = x2.to('cuda')
         with torch.no_grad():
             losses, outputs = self._get_outputs(x1, x2)
 
@@ -131,6 +172,7 @@ class Solver():
         self.linear_cca.fit(x1, x2, self.outdim_size)
 
     def _get_outputs(self, x1, x2):
+        self.model.to(self.device)
         with torch.no_grad():
             self.model.eval()
             data_size = x1.size(0)
@@ -142,9 +184,12 @@ class Solver():
             for batch_idx in batch_idxs:
                 batch_x1 = x1[batch_idx, :]
                 batch_x2 = x2[batch_idx, :]
+                batch_x1.to(self.device)
+                batch_x2.to(self.device)
                 o1, o2 = self.model(batch_x1, batch_x2)
                 outputs1.append(o1)
                 outputs2.append(o2)
+                # loss = F.mse_loss(o1,o2) #self.loss(o1, o2)
                 loss = self.loss(o1, o2)
                 losses.append(loss.item())
         outputs = [torch.cat(outputs1, dim=0).cpu().numpy(),
